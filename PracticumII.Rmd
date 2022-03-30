@@ -1,0 +1,684 @@
+---
+title: "Practicum II - Dylan Horgan"
+output:
+  pdf_document: default
+  html_notebook: default
+---
+
+```{r}
+library("XML")
+
+path <- "/Users/dyhorgangmail.com/sqlite/"
+xmlFile <- "pubmed_sample.xml"
+xmlDoc <- xmlParse(file = paste(path, xmlFile, sep="/"), validate=T)
+```
+
+```{r}
+library(RMySQL)
+
+db_user<-'admin'
+db_password<-'qwertyuiop'
+db_name<-'PracticumIIDb'
+db_host<-'practicumiidb.c53dkg2tawlv.us-east-1.rds.amazonaws.com'
+db_port<-3306
+
+dbcon <- dbConnect(MySQL(), user=db_user, password=db_password, name=db_name, host=db_host, port=db_port)
+```
+
+```{sql connection=dbcon}
+DROP DATABASE IF EXISTS practicumIIdb;
+```
+```{sql connection=dbcon}
+CREATE DATABASE practicumIIdb;
+```
+```{sql connection=dbcon}
+USE practicumIIdb;
+
+```
+
+
+```{sql connection=dbcon}
+DROP TABLE IF EXISTS Articles
+```
+```{sql connection=dbcon}
+DROP TABLE IF EXISTS Journals
+```
+```{sql connection=dbcon}
+DROP TABLE IF EXISTS History
+```
+```{sql connection=dbcon}
+DROP TABLE IF EXISTS Authors
+```
+```{sql connection=dbcon}
+DROP TABLE IF EXISTS AuthorArticlePairs
+```
+```{sql connection=dbcon}
+DROP TABLE IF EXISTS JournalArticlePairs
+```
+
+
+```{sql connection=dbcon}
+CREATE TABLE Articles(
+ArticleTitle TEXT,
+Pagination TEXT,
+ArticleDate TEXT,
+PMID VARCHAR(10) PRIMARY KEY
+)
+```
+
+
+
+```{sql connection=dbcon}
+CREATE TABLE Journals(
+ISSN VARCHAR(10) PRIMARY KEY,
+Issue TEXT,
+Title TEXT,
+Volume TEXT,
+PubDate TEXT
+)
+```
+
+```{sql connection=dbcon}
+CREATE TABLE Authors(
+LastName TEXT,
+FirstName TEXT,
+Initials TEXT,
+Affiliation TEXT,
+AuthorId VARCHAR(10) PRIMARY KEY
+)
+```
+
+```{sql connection=dbcon}
+
+CREATE TABLE AuthorArticlePairs(
+PMID VARCHAR(10),
+AuthorId VARCHAR(10),
+PRIMARY KEY(PMID, AuthorId),
+FOREIGN KEY (PMID) REFERENCES Articles(PMID),
+FOREIGN KEY (AuthorId) REFERENCES Authors(AuthorID)
+)
+
+```
+
+```{sql connection=dbcon}
+CREATE TABLE JournalArticlePairs(
+ISSN VARCHAR(10),
+PMID VARCHAR(10),
+PRIMARY KEY(PMID, ISSN),
+FOREIGN KEY (PMID) REFERENCES Articles(PMID),
+FOREIGN KEY (ISSN) REFERENCES Journals(ISSN)
+)
+
+```
+
+```{sql connection=dbcon}
+CREATE TABLE History(
+HistoryId VARCHAR(10) PRIMARY KEY,
+PMID VARCHAR(10),
+YEAR TEXT,
+MONTH TEXT,
+Day TEXT,
+Status TEXT
+)
+```
+
+
+
+
+```{r}
+xpathEx <- "//PubmedArticle/MedlineCitation/Article/ArticleTitle"
+xpathEx2 <- "//PubmedArticle/MedlineCitation/Article/Pagination"
+xpathEx3 <- "//PubmedArticle/MedlineCitation/Article/ArticleDate"
+articleIdPath <- "//PubmedArticle/MedlineCitation/PMID"
+
+x <- xpathSApply(xmlDoc, xpathEx)
+x2 <- xpathSApply(xmlDoc, xpathEx2)
+x3 <- xpathSApply(xmlDoc, xpathEx3)
+articleIdPointers <- xpathSApply(xmlDoc, articleIdPath)
+
+articleTitleArray <- xmlValue(x)
+paginationArray <- xmlValue(x2)
+dateArray <- xmlValue(x3)
+articleIdArray <- xmlValue(articleIdPointers)
+for (i in 1:length(dateArray)){
+  date <- dateArray[[i]]
+  year <- substr(date,0,4)
+  month <- substr(date,5,6)
+  day <- substr(date,7,8)
+  dateArray[[i]] <- paste(year,month,day,sep="-")
+}
+
+articleInfoArray <- paste(articleIdArray, articleTitleArray, paginationArray, dateArray, sep="#")
+
+historyInfoArray <- c()
+for(id in articleIdArray){
+  xpathEx14 <- paste("//PubmedArticle[MedlineCitation/PMID=",id,"]/PubmedData/History/PubMedPubDate/Year", sep="")
+  monthPath <- paste("//PubmedArticle[MedlineCitation/PMID=",id,"]/PubmedData/History/PubMedPubDate/Month", sep="")
+  dayPath <- paste("//PubmedArticle[MedlineCitation/PMID=",id,"]/PubmedData/History/PubMedPubDate/Day", sep="")
+  statusPath <- paste("//PubmedArticle[MedlineCitation/PMID=",id,"]/PubmedData/History/PubMedPubDate/@PubStatus", sep="")
+  x14 <- xpathSApply(xmlDoc, xpathEx14)
+  monthPointers <- xpathSApply(xmlDoc, monthPath)
+  dayPointers <- xpathSApply(xmlDoc, dayPath)
+  statuses <- xpathSApply(xmlDoc, statusPath)
+  
+  years <- xmlValue(x14)
+  months <- xmlValue(monthPointers)
+  days <- xmlValue(dayPointers)
+  
+  dates <- paste(years, months, days, sep="#")
+  
+  datesString <- toString(dates)
+  
+  statusesString <- toString(statuses)
+  History <- paste(id, datesString, statusesString, sep="/")
+  historyInfoArray <- append(historyInfoArray,History)
+}
+
+
+historyColumns <- c("HistoryId", "PMID", "Year", "Month", "Day", "Status")
+articleColumns <- c("PMID", "ArticleTitle", "Pagination", "ArticleDate")
+
+articleFrame <- data.frame(matrix(nrow=0, ncol=length(articleColumns)))
+historyFrame <- data.frame(matrix(nrow=0, ncol=length(historyColumns)))
+
+colnames(articleFrame) <- articleColumns
+colnames(historyFrame) <- historyColumns
+HistoryId = 1
+for(rowString in historyInfoArray){
+  rowStringArray <- unlist(strsplit(rowString, split="/"))
+  PMID <- rowStringArray[[1]]
+  Dates <- rowStringArray[[2]]
+  Statuses <- rowStringArray[[3]]
+  DatesArray <- unlist(strsplit(Dates, split=","))
+  StatusArray <- unlist(strsplit(Statuses, split=","))
+  for(dateIndex in 1:length(DatesArray)){
+    datestring <- DatesArray[[dateIndex]]
+
+    dateElements <- unlist(strsplit(datestring, split="#"))
+    
+    Year <- dateElements[[1]]
+    
+    Month <- dateElements[[2]]
+    
+    Day <- dateElements[[3]]
+    
+    Status <- StatusArray[[dateIndex]]
+    
+    historyFrame[nrow(historyFrame)+1,] <- c(as.character(HistoryId), PMID, Year, Month, Day, Status)
+    
+    HistoryId <- HistoryId + 1
+  }
+}
+  
+for(row in articleInfoArray){
+  articleStringArray <- unlist(strsplit(row, split="#"))
+  PMID <- articleStringArray[[1]]
+  ArticleTitle <- articleStringArray[[2]]
+  Pagination <- articleStringArray[[3]]
+  ArticleDate <- articleStringArray[[4]]
+  articleFrame[nrow(articleFrame)+1,] <- c(PMID,ArticleTitle, Pagination, ArticleDate)
+}
+
+print(articleFrame)
+print(historyFrame)
+dbWriteTable(dbcon, "History", historyFrame, append = TRUE, row.names=FALSE)
+dbWriteTable(dbcon, "Articles", articleFrame, append = T, row.names=FALSE)
+```
+
+```{r}
+ 
+ISSNPath <- "//PubmedArticle/MedlineCitation/Article/Journal/ISSN"
+
+ISSNPointers <- xpathSApply(xmlDoc, ISSNPath)
+
+ISSNArray <- xmlValue(ISSNPointers)
+
+distinctISSNArray = c()
+for (ISSNstring in ISSNArray){
+  if(!(ISSNstring %in% distinctISSNArray)){
+    distinctISSNArray <- append(distinctISSNArray, ISSNstring)
+  }
+}
+
+volumeArray <- c()
+issueArray <- c()
+titleArray <- c()
+yearArray <- c()
+pubdateArray <- c()
+pmidArray <- c()
+#j <- 0
+for (issn in distinctISSNArray){
+  xpathEx4 <- paste("//PubmedArticle/MedlineCitation/Article/Journal[ISSN='",issn,"']/JournalIssue/Volume",sep="")
+  xpathEx5 <- paste("//PubmedArticle/MedlineCitation/Article/Journal[ISSN='",issn,"']/JournalIssue/Issue",sep="")
+  xpathEx6 <- paste("//PubmedArticle/MedlineCitation/Article/Journal[ISSN='",issn,"']/Title[1]",sep="")
+  xpathEx7 <- paste("//PubmedArticle/MedlineCitation/Article/Journal[ISSN='",issn,"']/JournalIssue/PubDate/Year", sep="") 
+  xpathEx8 <- paste("//PubmedArticle/MedlineCitation/Article/Journal[ISSN='",issn,"']/JournalIssue/PubDate/Month",sep="") 
+  pmidPath <- paste("//PubmedArticle/MedlineCitation[Article/Journal[ISSN='",issn,"']]/PMID",sep="")
+  x4 <- xpathSApply(xmlDoc, xpathEx4)
+  x5 <- xpathSApply(xmlDoc, xpathEx5)
+  x6 <- xpathSApply(xmlDoc, xpathEx6)
+  x7 <- xpathSApply(xmlDoc, xpathEx7)
+  x8 <- xpathSApply(xmlDoc, xpathEx8)
+  pmidPointers <- xpathSApply(xmlDoc, pmidPath)
+  volumeArray <- append(volumeArray, xmlValue(x4[1]))
+  issueArray <- append(issueArray, xmlValue(x5[1]))
+  titleArray <- append(titleArray,xmlValue(x6[1]))
+  yearArray<- append(yearArray, xmlValue(x7[1]))
+  fulldate<- paste(xmlValue(x8[1]),xmlValue(x7[1]), sep="/")
+  pubdateArray<- append(pubdateArray, fulldate)
+  pmidArray<-append(pmidArray, xmlValue(pmidPointers[1]))
+}
+
+journalColumns <- c("ISSN", "volume","issue", "title", "pubdate")
+journalArticlePairsColumns <-c("PMID", "ISSN")
+
+journalFrame <- data.frame(matrix(nrow=0, ncol=length(journalColumns)))
+journalArticleFrame <- data.frame(matrix(nrow=0, ncol=length(journalArticlePairsColumns)))
+colnames(journalFrame) <- journalColumns
+colnames(journalArticleFrame) <- journalArticlePairsColumns
+for(i in 1:length(distinctISSNArray)){
+  ISSN <- distinctISSNArray[[i]]
+  Volume <- volumeArray[[i]]
+  Issue <- issueArray[[i]]
+  Title <- titleArray[[i]]
+  PubDate <- pubdateArray[[i]]
+  journalFrame[nrow(journalFrame)+1,] <- c(ISSN,Volume, Issue, Title, PubDate)
+}
+
+for(j in 1:length(ISSNArray)){
+  ISSN <- ISSNArray[[j]]
+  pmidPath <- paste("//PubmedArticle/MedlineCitation[Article/Journal[ISSN='",ISSN,"']]/PMID",sep="")
+  pmidPointers <- xpathSApply(xmlDoc, pmidPath)
+  for(pointer in pmidPointers){
+    pmid <- xmlValue(pointer)
+    journalArticleFrame[nrow(journalArticleFrame)+1,] <- c(pmid, ISSN)
+  }
+}
+
+print(journalFrame)
+print(journalArticleFrame)
+dbWriteTable(dbcon, "Journals", journalFrame, append=TRUE, row.names=FALSE)
+dbWriteTable(dbcon, "JournalArticlePairs", journalArticleFrame, append=TRUE, row.names=FALSE)
+```
+
+```{r}
+xpathEx9 <- "//PubmedArticle/MedlineCitation/Article/AuthorList/Author/LastName"
+xpathEx10 <- "//PubmedArticle/MedlineCitation/Article/AuthorList/Author/ForeName"
+xpathEx11 <- "//PubmedArticle/MedlineCitation/Article/AuthorList/Author/Initials"
+xpathEx13 <- "//PubmedArticle/MedlineCitation/Article/AuthorList/Author"
+
+x9 <- xpathSApply(xmlDoc, xpathEx9)
+x10 <- xpathSApply(xmlDoc, xpathEx10)
+x11 <- xpathSApply(xmlDoc, xpathEx11)
+x13 <- xpathSApply(xmlDoc, xpathEx13)
+
+lastauthorArray <- xmlValue(x9)
+firstauthorArray <- xmlValue(x10)
+initialsArray <- xmlValue(x11)
+fullAuthors <- xmlValue(x13)
+
+authorArray <- paste(firstauthorArray, lastauthorArray, initialsArray, sep="/")
+
+distinctAuthorArray <- c()
+
+for(y in 1:length(authorArray)){
+  
+  author <- authorArray[[y]]
+  
+  if(!(author %in% distinctAuthorArray)){
+    distinctAuthorArray <- append(distinctAuthorArray, author)
+  }
+}
+finalAuthorList <- c()
+for(d in 1:length(distinctAuthorArray)){
+  authorElement <- distinctAuthorArray[[d]]
+  wordArray <- unlist(strsplit(authorElement, "/"))
+  firstName <- wordArray[[1]]
+  xpathEx12 <- paste("//PubmedArticle/MedlineCitation/Article/AuthorList/Author[ForeName='",firstName,"']/Affiliation", sep = "")
+  x12 <- xpathSApply(xmlDoc, xpathEx12)
+  affiliation <- xmlValue(x12[1])
+  if(length(x12) > 0){
+    str <- paste(authorElement, affiliation, sep="/")
+    finalAuthorList <- append(finalAuthorList, str)
+  }else{
+    finalAuthorList <- append(finalAuthorList, distinctAuthorArray[[d]])
+  }
+}
+
+authorColumns <- c("AuthorId","LastName", "FirstName", "Initials", "Affiliation")
+authorArticlePairsColumns <-c("AuthorId", "PMID")
+
+authorFrame <- data.frame(matrix(nrow=0, ncol=length(authorColumns)))
+authorArticleFrame <- data.frame(matrix(nrow=0, ncol=length(authorArticlePairsColumns)))
+colnames(authorFrame) <-  authorColumns
+colnames(authorArticleFrame) <- authorArticlePairsColumns
+
+pmids <- list()
+
+for(author in finalAuthorList){
+  authorElements <- unlist(strsplit(author, split="/"))
+  firstName <- authorElements[[1]]
+  lastName <- authorElements[[2]]
+  
+  creditsPath <- paste("//PubmedArticle/MedlineCitation[Article/AuthorList/Author/ForeName[.='",firstName,"'] and Article/AuthorList/Author/LastName[.='",lastName,"']]/PMID", sep="")
+   
+  creditsPointers <- xpathSApply(xmlDoc, creditsPath)
+  
+  pmids[[author]] <- c()
+  for(pointer in creditsPointers){
+    pmids[[author]] <- append(pmids[[author]],xmlValue(pointer))
+  }
+}
+
+AuthorId <- 1
+for(row in finalAuthorList){
+  rowElements <- unlist(strsplit(row, split="/"))
+  FirstName <- rowElements[[1]]
+  LastName <- rowElements[[2]]
+  Initials <- rowElements[[3]]
+  Affiliation <- "NULL"
+  if(length(rowElements) > 3){
+    Affiliation <- rowElements[[4]]
+  }
+  authorFrame[nrow(authorFrame)+1,] <- c(as.character(AuthorId), LastName,FirstName, Initials, Affiliation)
+  AuthorId <- AuthorId + 1
+}
+
+AuthorId <- 1
+for(authorListing in names(pmids)){
+  authorElements <- unlist(strsplit(authorListing, split="/"))
+  for(pmid in pmids[[authorListing]]){
+    authorArticleFrame[nrow(authorArticleFrame)+1,] <- c(as.character(AuthorId), pmid)
+  }
+  AuthorId <- AuthorId+1
+}
+
+print(authorFrame)
+print(authorArticleFrame)
+dbWriteTable(dbcon, "Authors", authorFrame, append=TRUE, row.names=FALSE)
+dbWriteTable(dbcon, "AuthorArticlePairs", authorArticleFrame, append=TRUE, row.names=FALSE)
+```
+
+```{sql connection=dbcon}
+SELECT * 
+FROM History
+```
+
+
+
+```{sql connection=dbcon}
+SELECT * FROM Authors ORDER BY LastName
+```
+
+```{sql connection=dbcon}
+SELECT * FROM Journals
+```
+
+```{sql connection=dbcon}
+SELECT * FROM Articles
+```
+```{sql connection=dbcon}
+SELECT * FROM AuthorArticlePairs
+```
+```{sql connection=dbcon}
+SELECT * FROM JournalArticlePairs
+```
+
+
+```{sql connection=dbcon}
+CREATE SCHEMA IF NOT EXISTS starschema;
+```
+
+```{sql connection=dbcon}
+USE starschema;
+```
+
+```{sql connection=dbcon}
+DROP TABLE IF EXISTS starschema.author
+```
+```{sql connection=dbcon}
+DROP TABLE IF EXISTS starschema.article
+```
+```{sql connection=dbcon}
+DROP TABLE IF EXISTS starschema.journal
+```
+```{sql connection=dbcon}
+DROP TABLE IF EXISTS starschema.history
+```
+```{sql connection=dbcon}
+DROP TABLE IF EXISTS starschema.AuthorArticlePairs
+```
+```{sql connection=dbcon}
+DROP TABLE IF EXISTS starschema.JournalArticlePairs
+```
+```{sql connection=dbcon}
+DROP TABLE IF EXISTS starschema.publishedArticlesAuthorTimeDimensions
+```
+```{sql connection=dbcon}
+DROP TABLE IF EXISTS starschema.publishedArticlesJournalTimeDimensions
+```
+```{sql connection=dbcon}
+DROP TABLE IF EXISTS starschema.publishedArticlesAuthorFact
+```
+```{sql connection=dbcon}
+DROP TABLE IF EXISTS starschema.publishedArticlesJournalFact
+```
+```{sql connection=dbcon}
+DROP TABLE IF EXISTS starschema.publishedArticlesHistoryDimensions
+```
+```{sql connection=dbcon}
+DROP TABLE IF EXISTS starschema.historySubmit
+```
+```{sql connection=dbcon}
+DROP TABLE IF EXISTS starschema.historyPublish
+```
+```{sql connection=dbcon}
+CREATE TABLE starschema.author
+  AS SELECT LastName, FirstName, Initials, Affiliation FROM practicumIIdb.Authors;
+```
+```{sql connection=dbcon}
+CREATE TABLE starschema.article 
+  AS SELECT PMID, ArticleTitle, Pagination, Date(ArticleDate) as "ArticleDate" FROM practicumIIdb.Articles;
+```
+```{sql connection=dbcon}
+CREATE TABLE starschema.journal 
+ AS SELECT ISSN, volume,issue, title, pubdate FROM practicumIIdb.Journals;
+```
+```{sql connection=dbcon}
+CREATE TABLE starschema.history 
+  AS SELECT HistoryId, PMID, Year, Month, Day, Status FROM practicumIIdb.History;
+```
+```{sql connection=dbcon}
+CREATE TABLE starschema.AuthorArticlePairs
+  AS SELECT AuthorId, PMID FROM practicumIIdb.AuthorArticlePairs;
+```
+```{sql connection=dbcon}
+CREATE TABLE starschema.JournalArticlePairs
+  AS SELECT PMID, ISSN FROM practicumIIdb.JournalArticlePairs;
+```
+
+
+```{sql connection=dbcon}
+CREATE TABLE starschema.publishedArticlesAuthorTimeDimensions (
+  dimensionId int NOT NULL AUTO_INCREMENT PRIMARY KEY,
+  when_published TEXT,
+  quarter INT,
+  year_num INT,
+  AuthorId TEXT,
+  PMID TEXT
+)
+```
+
+```{sql connection=dbcon}
+INSERT INTO starschema.publishedArticlesAuthorTimeDimensions(when_published,quarter,year_num,AuthorId, PMID)
+  SELECT ArticleDate as when_published, quarter(ArticleDate) as quarter, year(ArticleDate) as year_num, AuthorId, starschema.article.PMID as PMID
+  FROM starschema.article
+  INNER JOIN starschema.AuthorArticlePairs ON starschema.AuthorArticlePairs.PMID = starschema.article.PMID;
+```
+```{sql connection=dbcon}
+CREATE TABLE starschema.publishedArticlesJournalTimeDimensions(
+  journalDimensionId int NOT NULL AUTO_INCREMENT PRIMARY KEY,
+  when_published TEXT,
+  quarter INT,
+  year_num INT,
+  ISSN TEXT,
+  PMID TEXT
+)
+```
+```{sql connection=dbcon}
+INSERT INTO starschema.publishedArticlesJournalTimeDimensions(when_published,quarter,year_num,ISSN, PMID)
+  SELECT ArticleDate as when_published, quarter(ArticleDate) as quarter, year(ArticleDate) as year_num, ISSN, starschema.article.PMID 
+  FROM starschema.article
+  INNER JOIN starschema.JournalArticlePairs ON starschema.JournalArticlePairs.PMID = starschema.article.PMID;
+```
+
+```{sql connection=dbcon}
+CREATE TABLE starschema.publishedArticlesHistoryDimensions(
+  PMID VARCHAR(10) PRIMARY KEY,
+  submitTime DATE,
+  publishTime DATE,
+  totalTime INT,
+  quarter INT
+)
+```
+```{sql connection=dbcon}
+CREATE TABLE starschema.historySubmit(
+HistoryId TEXT,
+PMID TEXT,
+submitTime TEXT,
+Status TEXT
+)
+```
+```{sql connection=dbcon}
+CREATE TABLE starschema.historyPublish(
+HistoryId TEXT,
+PMID TEXT,
+publishTime TEXT,
+Status TEXT
+)
+```
+
+
+```{sql connection=dbcon}
+INSERT INTO starschema.historySubmit(HistoryId, PMID, submitTime, Status)
+  SELECT HistoryId, PMID, CONCAT(Year,"-",Month,"-",Day) as "submitTime", Status FROM starschema.history WHERE Status="received"
+```
+
+```{sql connection=dbcon}
+INSERT INTO starschema.historyPublish(HistoryId, PMID, publishTime, Status)
+  SELECT HistoryId, PMID, CONCAT(Year,"-",Month,"-",Day) as "publishTime", Status FROM starschema.history WHERE Status LIKE '%medline%'
+```
+
+
+```{sql connection=dbcon}
+INSERT INTO starschema.publishedArticlesHistoryDimensions(PMID, submitTime, publishTime, totalTime, quarter)
+  SELECT DISTINCT starschema.historySubmit.PMID, submitTime, publishTime, DATEDIFF(publishTime,submitTime) as totalTime, quarter 
+  FROM starschema.historySubmit
+  INNER JOIN starschema.historyPublish ON starschema.historyPublish.PMID=starschema.historySubmit.PMID
+  INNER JOIN starschema.publishedArticlesAuthorTimeDimensions ON starschema.publishedArticlesAuthorTimeDimensions.PMID=starschema.historySubmit.PMID
+```
+
+
+```{sql connection=dbcon}
+CREATE TABLE starschema.publishedArticlesAuthorFact (
+  AuthorId VARCHAR(50),
+  year_num INT,
+  articlesPublished INT,
+  CONSTRAINT PRIMARY KEY(AuthorId, year_num)
+)
+```
+```{sql connection=dbcon}
+CREATE TABLE starschema.publishedArticlesJournalFact (
+  ISSN VARCHAR(10),
+  quarter INT,
+  articlesPublished int,
+  CONSTRAINT PRIMARY KEY(ISSN, quarter)
+)
+```
+
+```{sql connection=dbcon}
+INSERT INTO starschema.publishedArticlesAuthorFact(AuthorId, year_num, articlesPublished)
+  SELECT AuthorId, year_num, count(PMID) as articlesPublished 
+  FROM starschema.publishedArticlesAuthorTimeDimensions
+  GROUP BY year_num, AuthorId
+  ORDER BY AuthorId
+```
+```{sql connection=dbcon}
+INSERT INTO starschema.publishedArticlesJournalFact(ISSN, quarter, articlesPublished)
+  SELECT ISSN, quarter, count(PMID) as articlesPublished 
+  FROM starschema.publishedArticlesJournalTimeDimensions
+  GROUP BY quarter, ISSN
+  ORDER BY ISSN
+```
+
+
+```{sql connection=dbcon}
+SELECT * FROM starschema.publishedArticlesJournalTimeDimensions ORDER BY ISSN
+```
+```{sql connection=dbcon}
+SELECT * FROM publishedArticlesAuthorTimeDimensions
+```
+
+```{sql connection=dbcon}
+SELECT * FROM publishedArticlesAuthorFact
+```
+```{sql connection=dbcon}
+SELECT * FROM publishedArticlesJournalFact
+```
+
+```{sql connection=dbcon}
+SELECT * FROM starschema.history
+```
+
+```{sql connection=dbcon}
+SELECT * FROM publishedArticlesHistoryDimensions
+```
+```{sql connection=dbcon}
+SELECT * FROM starschema.historyPublish
+```
+```{sql connection=dbcon}
+SELECT * FROM historySubmit
+```
+
+
+
+```{r}
+library(sqldf)
+library(ggplot2)
+df <- dbReadTable(dbcon, "publishedArticlesJournalFact")
+options(sqldf.driver = "SQLite")
+res <- sqldf("SELECT SUM(articlesPublished) as amount_published, quarter FROM df GROUP BY quarter ")
+print(res)
+quarter<-res$quarter
+amount_published<-res$amount_published
+#plot(num,type="p",col="red",xlab="years?",ylab="articlesPublished's?")
+ggplot(res, aes(x=quarter, y=amount_published)) +
+  geom_line() + ggtitle("ArticlesPublished Per Quarter By Journals")
+
+df2 <- dbReadTable(dbcon, "publishedArticlesAuthorFact")
+res2 <- sqldf("SELECT SUM(articlesPublished) as articlesPublished, year_num FROM df2 GROUP BY year_num")
+year <- res2$year_num
+articlesPublished <- res2$articlesPublished
+ggplot(res2, aes(x=year, y=articlesPublished)) +
+  geom_line() + ggtitle("Articles Published by Authors 2011 vs. 2012")
+
+df3 <- dbReadTable(dbcon, "publishedArticlesHistoryDimensions")
+res3 <- sqldf("SELECT AVG(totalTime) as averageTime, quarter FROM df3 GROUP BY quarter")
+averageTimeInDays <- res3$averageTime
+PublicationQuarter <- res3$quarter
+
+ggplot(res3, aes(x=PublicationQuarter, y=averageTimeInDays)) +
+  geom_line() + ggtitle("Average Submit-to-Publication Time By Quarter")
+
+```
+
+---
+I did have to make some changes to my starschema to make the last graph. I had to make a new table with history info because I
+needed info about when certain parts of the publishing process occurred. I couldn't just use the normal History table because
+I need the pubdate and the submit date in the same row of my table.
+---
+
+
+```{r}
+dbDisconnect(dbcon)
+```
